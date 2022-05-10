@@ -1,0 +1,5 @@
+datos/
+.DS_Store
+notebooks_train/.ipynb_checkpoints/
+src/__pycache__/funcs_cotizador.cpython-39.pyc
+notebooks_train/catboost_info/
