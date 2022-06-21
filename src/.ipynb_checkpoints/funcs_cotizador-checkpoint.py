@@ -2,15 +2,14 @@ import pandas as pd
 import numpy as np
 import seaborn as sns
 import os,json
-from datetime import datetime
 import matplotlib.pyplot as plt
 from sklearn import metrics
 import itertools as it
 import pandas as pd
 import numpy as np
+from pandas.io import gbq
 import seaborn as sns
 import os,json
-from datetime import datetime
 import matplotlib.pyplot as plt
 from sklearn import metrics
 import itertools as it
@@ -18,7 +17,7 @@ from datetime import date, datetime, timedelta
 
 ######################################################################################################################
 
-def cleaning_before_split(df):
+def cleaning_before_split(df,ventana):
     '''Esta funcion se usa para las simulaciones.'''
     # parametros
     path_save = '../datos/'
@@ -97,12 +96,11 @@ def cleaning_before_split(df):
     # conditions = [df[col1]!='U$S', (df[col1]=='U$S') & (df[col2]==0), (df[col1]=='U$S') & (df[col2]!=0)]
     # choices = [df.price_amount, df['price_amount']*oficial, df['price_amount']*blue]
     # df['price_meli_ok'] = np.select(conditions, choices, default=np.nan)
-
-    mask = df.price_symbol == 'U$S'
-    df.drop(list(df[mask].index),axis=0,inplace=True)
-    df.rename(columns={'price_amount':'price_meli_ok'},inplace=True)
-    
-    print(f'Hey! {old_shape - df.shape[0]} were removed due prices in dollars')
+    #----
+    #mask = df.price_symbol == 'U$S'
+    #df.drop(list(df[mask].index),axis=0,inplace=True)
+    #df.rename(columns={'price_amount':'price_meli_ok'},inplace=True)
+    #print(f'Hey! {old_shape - df.shape[0]} were removed due prices in dollars')
     
     old_shape = df.shape[0]
     ### 4) Dropeamos 0kms y concesionarias
@@ -122,41 +120,16 @@ def cleaning_before_split(df):
     print(f'Hey! {old_shape - df.shape[0]} were removed due to match scores under 80%')
     old_shape = df.shape[0]
         
-    ### 6) Ultimos 15 días ###
+    ### 6) Ultimos 15(ventana) días ###
     df['runtime'] = df['runtime'].apply(pd.to_datetime)
     max_date = df.runtime.max()
-    mask_last15d = (df.runtime <= max_date) & ((df.runtime >= max_date - timedelta(days=15)))
-    df = df[mask_last15d]
+    mask_window = (df.runtime <= max_date) & ((df.runtime >= max_date - timedelta(days=ventana)))
+    df = df[mask_window]
     
     print(f'Hey! {old_shape - df.shape[0]} were removed due to last 15d filter')
     old_shape = df.shape[0]
     
-#     ### 7) Outliers globales ###
-#     f = open(os.path.join(path_save,'thresh_outliers_1.json'))
-#     thresh_outliers_1 = json.load(f)
-#     # dropeamos outliers globales en price
-#     mask = df.price_meli_ok <= thresh_outliers_1['price_p995']
-#     df = df[mask]
-#     # dropeamos outliers globales en kms
-#     mask = df.car_kms > thresh_outliers_1['kms_p995']
-#     df = df[~mask]
-    
-#     print(f'Hey! {old_shape - df.shape[0]} were removed due to outliers globales')
-    
-    
-#     old_shape = df.shape[0]
-#     ### 8) Categorías que no nos interesa cotizar ###
-    
-    # marcas_ok = pd.read_csv('{}marcas_ok.csv'.format(path_save), index_col=[0])
-    # modelos_ok = pd.read_csv('{}modelos_ok.csv'.format(path_save), index_col=[0])
-    # versiones_ok = pd.read_csv('{}versiones_ok.csv'.format(path_save), index_col=[0])
-    # marcas_ok = list(marcas_ok.iloc[:,0])
-    # modelos_ok = list(modelos_ok.iloc[:,0])
-    # versiones_ok = list(versiones_ok.iloc[:,0])
-    # mask1 = df.match_marca_a.apply(lambda x: x in marcas_ok)
-    # mask2 = df.match_modelo_a.apply(lambda x: x in modelos_ok)
-    # mask3 = df.match_v1_a.apply(lambda x: x in versiones_ok)
-    
+    #### 7) Categorías que no nos interesa cotizar ###    
     marc_mod_vers_OK = pd.read_csv('{}marc_mod_vers_OK.csv'.format(path_save), index_col=[0])
     marc_mod_vers_OK = list(marc_mod_vers_OK.iloc[:,0])
     mask = df.marca_modelo_version.apply(lambda x: x in marc_mod_vers_OK)
@@ -165,6 +138,44 @@ def cleaning_before_split(df):
     print(f'Hey! {old_shape - df.shape[0]} were removed due to categories in which we are not interested in score')
     
     
+    #### 8) Target: convertimos los precios en pesos a dolar ###
+
+    # Columna que nos indique dia de semana para ver cuando es finde
+    df['date'] = pd.to_datetime(df['date'])
+    df['dia_sem'] = df.date.dt.day_of_week
+    dic = {0:'Monday', 1:'Tuesday', 2:'Wednesday', 3:'Thursday', 4:'Friday', 5:'Saturday', 6:'Sunday'}
+    df['dia_sem'] = df.dia_sem.map(dic)
+    df.dia_sem.unique()
+    # Ahora crearemos una que le ponga la fecha del viernes anterior a todos los dias que sean findesemana
+    df['date_ok'] = np.where(df['dia_sem'].apply(lambda x: x in ('Saturday','Sunday'))
+                             ,np.where(df['dia_sem']=='Saturday'
+                                       ,df['date'] - timedelta(1)
+                                       ,df['date'] - timedelta(2))
+                             ,df['date'])
+    # Importar tabla de Big Query
+    filter_date = '2022-01-01'
+    query = '''
+                select *
+                from `data-team-k.pricing_data.dolar_values` 
+                where date >= '{}'
+                and source = 'Blue'
+                order by date
+
+                '''.format(filter_date)
+    df_dolar_values = gbq.read_gbq(query, project_id="data-team-k")
+    df_dolar_values.columns = [col.lower() for col in df_dolar_values]
+    # Ahora si procedemos a hacer el join con el df_dolar_values
+    df = df.merge(df_dolar_values, how='inner', left_on='date_ok', right_on='date')
+    df.drop(['date_y','source','compra'],1,inplace=True)
+    df.rename(columns={'venta':'blue_venta'},inplace=True)
+    # Finalmente, creamos la columna de precio final en dolares
+    ## Los precios en dolares se mantienen como estan y los precios en pesos se pasan a dolar mediante el blue
+    df['price_meli_ok'] = np.where(df.price_symbol == '$', df.price_amount / df.blue_venta, df.price_amount)
+    
+    return df
+    
+    
+    #### 9) Ultimos retoques ###  
     # cuando hice el tratamiento de 1111 y 99999 había pasado la feature de kms a int. Volvemos a pasar a float por el catboost
     #df['car_kms'] = df['car_kms'].astype('float') # lo hacemos en la prox func de procesamiento
     df['car_year'] = df['car_year'].astype('int')
@@ -174,7 +185,8 @@ def cleaning_before_split(df):
     others = ['car_location_1', 'match_v1_c']
     df = df[id_features + model_features + others]
     
-    return df
+    
+
     
 
 ######################################################################################################################
@@ -218,8 +230,10 @@ def cleaning_after_split(df, path_data):
             
             modelo_año = m + '_' + str(a)
             
-            if (str(price_thresh_outliers[modelo_año][0]) == 'nan'):
-                pass
+            if modelo_año not in list(price_thresh_outliers.keys()):
+                continue
+            elif (str(price_thresh_outliers[modelo_año][0]) == 'nan'):
+                continue
             else:
                 # kms
                 mask1 = df.match_modelo_a == m
